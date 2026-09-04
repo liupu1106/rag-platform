@@ -1,9 +1,13 @@
 # RAG 全流程实操平台
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/liupu1106/rag-platform)
+
 一个**可交互、可拆解、可验证**的 RAG（Retrieval-Augmented Generation）全流程实验平台。
 不是又一个「调个 LangChain 就完事」的 demo —— 这里每一层都可替换、每个中间态都可见、每个环节都有量化评测。
 
 零前端构建、零前端依赖，后端仅 Flask + numpy + jieba，**离线可跑通全链路**；接上任意 OpenAI 兼容 / Anthropic 接口即可升级为真实语义检索与流式生成。
+
+> 仓库地址：https://github.com/liupu1106/rag-platform
 
 ---
 
@@ -122,9 +126,15 @@ docker run -p 8080:8080 --env-file .env rag-platform
 
 多阶段构建，最终镜像以非 root 用户运行，内置 `HEALTHCHECK` 探活 `/healthz`。
 
-### Render / Railway
+### Render（一键）
 
-仓库内已带 `render.yaml` 与 `railway.json`，导入仓库后平台会自动识别构建配置，只需在面板填环境变量即可。
+点上方 **Deploy to Render** 按钮，Render 会自动读取根目录的 `render.yaml` 完成构建配置，
+你只需要在向导里填需要的环境变量（`RAG_LLM_KEY` 等，全部可留空，留空则走离线模式）。
+
+### Railway
+
+仓库内已带 `railway.json`，在 Railway 选择 **Deploy from GitHub repo** 并选中本仓库即可，
+之后在 Variables 面板填环境变量。
 
 ### 其他 PaaS
 
