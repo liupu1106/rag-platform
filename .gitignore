@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
 store/
 *.log
 .env
-.git
+.DS_Store
 .codebuddy
