@@ -1,0 +1,28 @@
+# Render Blueprint：在 Render 一键部署（https://render.com）
+# 部署时在控制台「Environment」里填下方的 secret 变量即可。
+services:
+  - type: web
+    name: rag-platform
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: RAG_EMB_KIND
+        value: "tfidf"
+      - key: RAG_LLM_PROVIDER
+        value: "openai"
+      - key: RAG_LLM_BASE
+        sync: false
+      - key: RAG_LLM_KEY
+        sync: false
+      - key: RAG_LLM_MODEL
+        sync: false
+      - key: RAG_EMB_BASE
+        sync: false
+      - key: RAG_EMB_KEY
+        sync: false
+      - key: RAG_TOKEN
+        sync: false

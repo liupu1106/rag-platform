@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAG 全流程实操平台</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🛠️ RAG 全流程实操平台</h1>
+    <p>手把手跑通真实可运行的检索增强生成（RAG）项目 · 支持上传自有文档 / 2D 向量可视化 / 流式生成 / 评测</p>
+  </header>
+
+  <div class="tip">
+    💡 按从左到右顺序点击节点，每步都有「运行」与实时输出；点标题旁
+    <span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:var(--purple);color:#0c0820;text-align:center;font-size:11px;font-weight:700">i</span>
+    看概念解释；卡住就点右下角「💬 问 AI 助手」。顶部可<b>上传自己的文档</b>建独立知识库。
+  </div>
+
+  <div class="bar">
+    <span class="chip">📚 当前知识库：<b id="curCol">—</b></span>
+    <label class="upbtn">📤 上传文档
+      <input type="file" id="fileIn" multiple accept=".txt,.md,.json,.pdf" hidden />
+    </label>
+    <span id="upMsg" style="color:var(--green);font-size:12.5px"></span>
+  </div>
+
+  <div class="pipeline" id="pipeline"></div>
+  <div id="stepHost"></div>
+
+  <div class="foot">
+    离线零依赖可运行：Embedding 默认用 TF-IDF（教学近似），可在「向量化」切换真实 Embedding API；生成默认离线检索增强摘要，可接 OpenAI/Ollama/Anthropic 流式输出。向量库持久化到磁盘，重启不丢。
+  </div>
+</div>
+
+<div class="chat" id="chat">
+  <div class="hd" id="chatHd" title="点击展开 / 收起 AI 助手">
+    <span class="hd-ico">💬</span><span class="hd-txt">问 AI 助手</span>
+    <small id="chatMode">随时问我 RAG 的任何问题</small><span class="min-btn">－</span>
+  </div>
+  <div class="body" id="chatBody"></div>
+  <div class="quick" id="chatQuick">
+    <span>RAG 是什么</span><span>检索怎么算相似</span><span>怎么接真实大模型</span><span>怎么上传自己的文档</span><span>如何评测 RAG</span>
+  </div>
+  <div class="ft"><input id="chatIn" placeholder="遇到问题？直接问…" /><button class="btn" id="chatSend">发送</button></div>
+</div>
+
+<div class="pop" id="pop"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

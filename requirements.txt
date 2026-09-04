@@ -1,0 +1,8 @@
+flask>=3.0
+jieba>=0.42
+numpy>=1.24
+requests>=2.28
+pypdf>=4.0
+# 可选（提升体验，非必需）：
+#   sentence-transformers  -> 真实 Cross-Encoder Rerank（不装则 Rerank 退回 BM25 启发式）
+#   torch                  -> sentence-transformers 依赖
