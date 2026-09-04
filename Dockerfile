@@ -2,7 +2,15 @@
 FROM python:3.11-slim AS builder
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# PIP_INDEX_URL 可选：处于内网 / 防火墙后时用国内镜像加速或绕过封锁
+# 例：docker build --build-arg PIP_INDEX_URL=https://mirrors.tencent.com/pypi/simple/ .
+ARG PIP_INDEX_URL=""
+RUN if [ -n "$PIP_INDEX_URL" ]; then \
+      pip install --no-cache-dir --prefix=/install -r requirements.txt -i "$PIP_INDEX_URL"; \
+    else \
+      pip install --no-cache-dir --prefix=/install -r requirements.txt; \
+    fi
 
 # ---- 运行阶段：非 root + 健康检查 ----
 FROM python:3.11-slim
