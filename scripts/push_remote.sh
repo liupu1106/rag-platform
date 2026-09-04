@@ -44,14 +44,57 @@ precheck() {
 }
 
 # ---------- 获取 GitHub Token ----------
+# 优先级: $GH_PAT（用户自备的 Personal Access Token）> $GITHUB_TOKEN > OAuth 网关
+# 注意：OAuth 网关给出的是 GitHub App 令牌(ghu_ 前缀)，它能读仓库、调 REST API，
+#       但没有 git-over-HTTPS 的写权限，也无法新建仓库 —— 建仓/推送必须用真正的 PAT。
 fetch_github_token() {
-  [ -n "${GITHUB_TOKEN:-}" ] && { log "使用环境中的 GITHUB_TOKEN"; return 0; }
+  if [ -n "${GH_PAT:-}" ]; then
+    GITHUB_TOKEN="$GH_PAT"; export GITHUB_TOKEN
+    log "使用 GH_PAT（Personal Access Token）"; return 0
+  fi
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    case "$GITHUB_TOKEN" in
+      ghu_*|ghs_*)
+        warn "检测到 GitHub App 令牌（${GITHUB_TOKEN:0:4} 前缀）"
+        warn "这类令牌无法新建仓库、也无法 git push，请改用 PAT："
+        warn "  export GH_PAT=github_pat_xxxx   # https://github.com/settings/tokens"
+        return 1 ;;
+      *) log "使用环境中的 GITHUB_TOKEN"; return 0 ;;
+    esac
+  fi
   local script="/root/.codebuddy/skills/github-connector/scripts/get_token.sh"
-  [ -f "$script" ] || { warn "未找到 OAuth 脚本，请手动 export GITHUB_TOKEN"; return 1; }
+  [ -f "$script" ] || { warn "未找到 OAuth 脚本，请 export GH_PAT=你的PAT"; return 1; }
   # shellcheck disable=SC1090
-  source "$script" github >/dev/null 2>&1 || { warn "OAuth 取 token 失败，请手动 export GITHUB_TOKEN"; return 1; }
-  [ -n "${GITHUB_TOKEN:-}" ] && { log "已通过 OAuth 网关获取 GITHUB_TOKEN"; return 0; }
+  source "$script" github >/dev/null 2>&1
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    case "$GITHUB_TOKEN" in
+      ghu_*|ghs_*)
+        warn "OAuth 网关返回的是 GitHub App 令牌，权限不足以建仓/推送"
+        warn "请自备 PAT：export GH_PAT=github_pat_xxxx"
+        return 1 ;;
+      *) log "已通过 OAuth 网关获取 GITHUB_TOKEN"; return 0 ;;
+    esac
+  fi
+  warn "未能获取可用令牌，请 export GH_PAT=你的PAT"
   return 1
+}
+
+# ---------- 推送前权限自检（避免推到一半才 403）----------
+check_push_permission() {
+  local token="$1" repo_full="$2"
+  local perms
+  perms=$(curl -s -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo_full" \
+          | sed -n 's/.*"permissions" *: *{\([^}]*\)}.*/\1/p')
+  [ -n "$perms" ] || return 0   # 仓库刚建好可能查不到，跳过自检
+  case "$perms" in
+    *'"push":true'*) log "令牌对该仓库有 push 权限"; return 0 ;;
+    *)
+      warn "令牌对 $repo_full 没有 push 权限（permissions: {$perms}）"
+      warn "请换一个带 repo 作用域的 PAT"
+      return 1 ;;
+  esac
 }
 
 # ---------- 创建远端仓库 ----------
@@ -94,7 +137,14 @@ case "$PLATFORM" in
     create_remote "https://api.github.com/user/repos" "$GITHUB_TOKEN" \
       "{\"name\":\"$REPO\",\"private\":$PRIVATE,\"description\":\"RAG 全流程实操平台\"}" || exit 1
 
-    REMOTE="https://oauth2:${GITHUB_TOKEN}@github.com/${OWNER}/${REPO}.git"
+    check_push_permission "$GITHUB_TOKEN" "${OWNER}/${REPO}" || exit 1
+
+    # PAT 用 oauth2:，GitHub App 安装令牌用 x-access-token:
+    case "$GITHUB_TOKEN" in
+      ghu_*|ghs_*) AUTH_PREFIX="x-access-token" ;;
+      *)           AUTH_PREFIX="oauth2" ;;
+    esac
+    REMOTE="https://${AUTH_PREFIX}:${GITHUB_TOKEN}@github.com/${OWNER}/${REPO}.git"
     WEBURL="https://github.com/${OWNER}/${REPO}"
     ;;
 
