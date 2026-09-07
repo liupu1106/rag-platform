@@ -60,8 +60,10 @@ rag-platform/
 ├── app.py            # Flask 主应用：13 个 API 路由 + 内置 FAQ 问答库
 ├── embed.py          # 向量化：TfidfEmbedder / OpenAIEmbedder / PCA 降维投影
 ├── retrieve.py       # 检索：余弦相似度 / BM25(Okapi) / RRF 融合 / Rerank
-├── generate.py       # 生成：SSE 流式（OpenAI / Ollama / Anthropic）+ 离线摘要
+├── generate.py       # 生成：SSE 流式（经 llm_client 多模型降级）+ 离线摘要
 ├── rewrite.py        # 查询改写（LLM，未配置则原样返回）
+├── llm_client.py     # 大模型调用桥接：多模型降级（fallback_manager）
+├── fallback_manager/ # 降级核心（零依赖，vendored；见 llm_client 章节）
 ├── datautil.py       # 示例数据、切分逻辑、6 条标注评测集 GOLD
 ├── evalutil.py       # Recall@K 评测
 ├── store.py          # 多集合持久化（matrix.npy + meta.json）
@@ -91,6 +93,54 @@ rag-platform/
 
 ---
 
+## 模型调用降级（主备自动切换）
+
+所有走大模型的路径（**查询改写 `rewrite`、流式生成 `generate`、内置 FAQ 助手 `ask`**）都经过统一的
+`llm_client` → `fallback_manager` 桥接层。当主模型请求失败或不可用时，**自动切换到备用模型继续处理，
+对上层调用方完全透明**。
+
+### 能力清单
+
+- **主备配置与优先级**：`priority` 越小越优先（主模型 = 0）。可随时通过 `set_enabled` 摘流某个模型。
+- **失败判定**：超时 / 连接错误 / `429` 限流 / `5xx` → 可重试（重试 + 切备用）；`400/401/403` → **致命，立即中止不切**（同请求切过去必同样失败，纯浪费）。
+- **自动切换 + 重试**：单模型内指数退避重试（带抖动，避免多调用方惊群）；耗尽后按优先级切下一个。
+- **熔断 + 自动回切**：连续失败达阈值即熔断冷却，冷却后放一个探活请求，成功即恢复；因每次请求按优先级选第一个可用模型，下一请求天然回到主模型。
+- **日志 + 告警**：仅在**状态转移**时发事件（健康→不可用 / 不可用→恢复 / 切换 / 全失败），不刷屏；内置 logging，可选 webhook（Slack/飞书/Alertmanager）。
+- **边界处理**：全失败抛 `AllModelsFailed`（带完整降级路径）；全熔断冷却中抛 `AllModelsUnavailable`（带 `retry_after`）。
+
+### 配置多模型降级
+
+默认（不配 `RAG_LLM_MODELS`）走单模型，仅获得一致的错误处理。要开启主备降级，设 `RAG_LLM_MODELS` 为
+JSON 数组，每个元素：
+
+```json
+[
+  {"name":"primary",  "provider":"openai", "base_url":"https://api.openai.com/v1",                  "api_key":"sk-xxx",    "model":"gpt-4o-mini",   "priority":0, "timeout":120, "max_retries":2},
+  {"name":"deepseek", "provider":"openai", "base_url":"https://api.deepseek.com/v1",                "api_key":"sk-ds-xxx", "model":"deepseek-chat", "priority":1, "timeout":60,  "max_retries":1},
+  {"name":"qwen",     "provider":"openai", "base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key":"sk-qw-xxx", "model":"qwen-plus", "priority":2, "timeout":60, "max_retries":1}
+]
+```
+
+> 所有 `provider:"openai"` 的端点都走 `/chat/completions`，因此 OpenAI / DeepSeek / 通义千问 / Ollama
+> 可混编成降级链。也支持 `provider:"anthropic"`（`/v1/messages`）。
+
+### 流式场景的降级边界（重要）
+
+`generate` 是 SSE 流式输出。降级**只覆盖「建连 / 首字节前失败」**——一旦开始吐字，中途断流无法对客户端
+透明重试（已吐出的 token 收不回）。这是流式 LLM 的硬约束，此时由上层 `gen()` 把异常转成 error 事件，
+而不是假装重试。非流式路径（改写 / FAQ 助手）则是完整降级。
+
+### 可观测性
+
+```python
+from llm_client import get_client
+client = get_client()
+print(client.last_used_model)   # 本次实际用的模型
+print(client.stats())           # 每模型健康状态 + 上次服务模型
+```
+
+---
+
 ## 配置（全部走环境变量，不落盘密钥）
 
 复制 `.env.example` 为 `.env` 后按需填写：
@@ -102,6 +152,14 @@ rag-platform/
 | `RAG_LLM_KEY` | 空 | LLM API Key |
 | `RAG_LLM_MODEL` | `gpt-3.5-turbo` | 模型名 |
 | `RAG_TEMPERATURE` | `0.2` | 采样温度 |
+| `RAG_LLM_MODELS` | 空 | **多模型降级**：JSON 数组，见下。留空则用单模型配置 |
+| `RAG_LLM_ALERT_WEBHOOK` | 空 | 切换/恢复告警 webhook（Slack/飞书/Alertmanager 均可），留空只打日志 |
+| `RAG_LLM_FAILURE_THRESHOLD` | `3` | 连续失败多少次后熔断该模型（进入冷却） |
+| `RAG_LLM_COOLDOWN` | `60.0` | 熔断冷却秒数，期间跳过该模型、放探活请求 |
+| `RAG_LLM_MAX_RETRIES` | `2` | 单模型内重试次数（指数退避 + 抖动） |
+| `RAG_LLM_TOTAL_TIMEOUT` | `120.0` | 单次请求累计耗时上限（秒），超时放弃降级 |
+| `RAG_LLM_DEGRADE_THRESHOLD` | `1` | 几次失败标记为 degraded（仍可用，仅告警） |
+| `RAG_LLM_TIMEOUT` | `120` | 单模型单次 HTTP 超时（秒） |
 | `RAG_EMB_KIND` | `tfidf` | `tfidf` / `openai` |
 | `RAG_EMB_BASE` | `https://api.openai.com/v1` | Embedding 接口 |
 | `RAG_EMB_KEY` | 空 | Embedding Key |
@@ -149,7 +207,8 @@ pip install pytest
 pytest -q
 ```
 
-11 项测试覆盖：健康检查、状态与默认集合、载入、向量化与投影、检索 Top-1、hybrid/rerank 开关、Prompt 组装、离线流式生成、Recall@K 评测、文件上传、鉴权拦截。
+11 项测试覆盖：健康检查、状态与默认集合、载入、向量化与投影、检索 Top-1、hybrid/rerank 开关、Prompt 组装、离线流式生成、Recall@K 评测、文件上传、鉴权拦截；
+`tests/test_llm_fallback.py` 额外覆盖：主备自动切换、熔断后跳过主模型、探活恢复后回切、全部失败/全部不可用、流式降级、切换/恢复告警。
 
 ---
 

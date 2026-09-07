@@ -13,6 +13,8 @@ from rewrite import rewrite_query
 from generate import stream_generate, offline_answer
 from evalutil import evaluate
 from auth import guard
+import llm_client
+from llm_client import AllModelsFailed, AllModelsUnavailable
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 
@@ -25,11 +27,25 @@ CFG = {
     'llm_model': _env('RAG_LLM_MODEL', 'gpt-3.5-turbo'),
     'llm_provider': _env('RAG_LLM_PROVIDER', 'openai'),
     'temperature': float(_env('RAG_TEMPERATURE', '0.2')),
+    # —— 多模型降级（可选）——
+    # RAG_LLM_MODELS: JSON 数组，每个元素 {name,provider,base_url,api_key,model,priority,timeout,max_retries}
+    #   留空则使用下方单模型配置（向后兼容）。priority 越小越优先（主模型）。
+    'llm_models': _env('RAG_LLM_MODELS', ''),
+    'llm_alert_webhook': _env('RAG_LLM_ALERT_WEBHOOK', ''),  # 切换/恢复告警 webhook
+    'llm_timeout': int(_env('RAG_LLM_TIMEOUT', '120')),
+    'llm_max_retries': int(_env('RAG_LLM_MAX_RETRIES', '2')),
+    'llm_failure_threshold': int(_env('RAG_LLM_FAILURE_THRESHOLD', '3')),
+    'llm_cooldown': float(_env('RAG_LLM_COOLDOWN', '60.0')),
+    'llm_degrade_threshold': int(_env('RAG_LLM_DEGRADE_THRESHOLD', '1')),
+    'llm_total_timeout': float(_env('RAG_LLM_TOTAL_TIMEOUT', '120.0')),
     'emb_base': _env('RAG_EMB_BASE', 'https://api.openai.com/v1'),
     'emb_key': _env('RAG_EMB_KEY', ''),
     'emb_model': _env('RAG_EMB_MODEL', 'text-embedding-3-small'),
     'emb_kind': _env('RAG_EMB_KIND', 'tfidf'),
 }
+
+# 启动时根据配置构建降级管理器（无大模型配置时 get_client() 返回 None -> 离线模式）
+llm_client.rebuild(CFG)
 
 # 启动：确保默认集合存在
 build_default(emb_kind='tfidf')
@@ -117,7 +133,7 @@ def api_state():
         'ok': True, 'default_cid': DEFAULT_CID,
         'collections': list_collections(),
         'has_default': bool(col),
-        'config': {'llm': bool(CFG['llm_key'] and CFG['llm_base']),
+        'config': {'llm': llm_client.get_client() is not None,
                    'emb_openai': bool(CFG['emb_key'] and CFG['emb_base']),
                    'emb_kind': CFG['emb_kind']},
     })
@@ -127,9 +143,13 @@ def api_state():
 def api_config():
     d = request.get_json(silent=True) or {}
     for k in ('llm_base', 'llm_key', 'llm_model', 'llm_provider', 'temperature',
+             'llm_models', 'llm_alert_webhook', 'llm_timeout', 'llm_max_retries',
+             'llm_failure_threshold', 'llm_cooldown', 'llm_degrade_threshold', 'llm_total_timeout',
              'emb_base', 'emb_key', 'emb_model', 'emb_kind'):
         if k in d:
             CFG[k] = d[k]
+    # 配置变化后重建降级管理器（清掉旧熔断状态，重读多模型配置）
+    llm_client.rebuild(CFG)
     return jsonify({'ok': True, 'cfg': {k: ('***' if 'key' in k and v else v) for k, v in CFG.items()}})
 
 
@@ -346,20 +366,19 @@ def api_ask():
     if not q:
         return jsonify({'ok': False, 'error': '请输入问题'}), 400
     hit = answer_faq(q)
-    if CFG['llm_key'] and CFG['llm_base']:
+    client = llm_client.get_client()
+    if client is not None:
         try:
-            import requests
             kb = '\n'.join(f"- {f['q']}: {f['a']}" for f in FAQ)
-            url = CFG['llm_base'].rstrip('/') + '/chat/completions'
-            resp = requests.post(url, json={
-                'model': CFG['llm_model'],
-                'messages': [{'role': 'system', 'content': '你是 RAG 教学助手，用简洁中文回答。\n知识库：\n' + kb},
-                             {'role': 'user', 'content': q}], 'temperature': 0.3},
-                headers={'Authorization': f"Bearer {CFG['llm_key']}", 'Content-Type': 'application/json'}, timeout=60)
-            if resp.status_code == 200:
-                return jsonify({'ok': True, 'mode': 'llm', 'answer': resp.json()['choices'][0]['message']['content'].strip()})
-        except Exception:
-            pass
+            ans = llm_client.chat([
+                {'role': 'system', 'content': '你是 RAG 教学助手，用简洁中文回答。\n知识库：\n' + kb},
+                {'role': 'user', 'content': q},
+            ], stream=False, temperature=0.3)
+            if isinstance(ans, str) and ans.strip():
+                return jsonify({'ok': True, 'mode': 'llm', 'answer': ans.strip(),
+                               'model': client.last_used_model})
+        except (AllModelsFailed, AllModelsUnavailable):
+            pass  # 全部模型不可用：降级到 FAQ / 兜底回答
     if hit:
         return jsonify({'ok': True, 'mode': 'faq', 'answer': hit['a'], 'goto_step': _step_of(hit['q']), 'matched': hit['q']})
     return jsonify({'ok': True, 'mode': 'fallback', 'answer': '我暂时没有匹配到确切答案。你可以问：RAG 是什么 / 为什么要切分 / 向量化怎么做 / 检索怎么算相似 / 怎么接真实大模型 / 怎么上传自己的文档。'})

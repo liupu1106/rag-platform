@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
-"""生成：多 Provider（OpenAI / Ollama / Anthropic）流式输出；离线检索增强摘要。"""
-import requests
+"""生成：多 Provider（OpenAI / Ollama / Anthropic）流式输出；离线检索增强摘要。
+
+已接入 fallback_manager：主备多模型自动降级、失败重试、熔断、自动回切对上层透明。
+流式场景的降级边界：仅覆盖「建连 / 首字节前失败」即切换到备用模型；一旦开始吐字，
+中途断流无法对客户端透明重试（已吐出的 token 收不回），由上层 api_generate_stream
+的 gen() 统一转成 error 事件。
+"""
+from llm_client import get_client, chat, AllModelsFailed, AllModelsUnavailable
 
 
 def offline_answer(query, results):
@@ -16,68 +22,25 @@ def _chunks(s, n=24):
         yield s[i:i + n]
 
 
-def _stream_openai(prompt, cfg):
-    """OpenAI / Ollama（均兼容 /chat/completions SSE）。"""
-    url = cfg['llm_base'].rstrip('/') + '/chat/completions'
-    resp = requests.post(url, json={
-        'model': cfg.get('llm_model', 'gpt-3.5-turbo'),
-        'messages': [{'role': 'user', 'content': prompt}],
-        'temperature': float(cfg.get('temperature', 0.2)),
-        'stream': True,
-    }, headers={'Authorization': f"Bearer {cfg['llm_key']}", 'Content-Type': 'application/json'},
-        timeout=120, stream=True)
-    for line in resp.iter_lines():
-        if not line:
-            continue
-        line = line.decode('utf-8') if isinstance(line, bytes) else line
-        if not line.startswith('data:'):
-            continue
-        data = line[5:].strip()
-        if data == '[DONE]':
-            break
-        try:
-            obj = __import__('json').loads(data)
-            delta = obj['choices'][0]['delta'].get('content')
-            if delta:
-                yield delta
-        except Exception:
-            continue
-
-
-def _stream_anthropic(prompt, cfg):
-    """Anthropic Messages Streaming（轻量实现）。"""
-    url = (cfg['llm_base'].rstrip('/') + '/v1/messages') if 'messages' not in cfg['llm_base'] else cfg['llm_base']
-    resp = requests.post(url, json={
-        'model': cfg.get('llm_model', 'claude-3-5-haiku-latest'),
-        'max_tokens': 1024,
-        'messages': [{'role': 'user', 'content': prompt}],
-        'stream': True,
-    }, headers={'x-api-key': cfg['llm_key'], 'anthropic-version': '2023-06-01',
-                'Content-Type': 'application/json'}, timeout=120, stream=True)
-    for line in resp.iter_lines():
-        if not line:
-            continue
-        line = line.decode('utf-8') if isinstance(line, bytes) else line
-        if not line.startswith('data:'):
-            continue
-        try:
-            obj = __import__('json').loads(line[5:].strip())
-            if obj.get('type') == 'content_block_delta':
-                yield obj['delta'].get('text', '')
-        except Exception:
-            continue
-
-
 def stream_generate(prompt, cfg, results=None, query=None):
     """生成器：逐段 yield 文本（供 SSE 封装）。"""
-    provider = (cfg.get('llm_provider') or 'openai').lower()
-    if not (cfg.get('llm_key') and cfg.get('llm_base')):
+    client = get_client()
+    # 未配置大模型 -> 离线检索增强摘要
+    if client is None:
         for piece in _chunks(offline_answer(query, results)):
             yield piece
         return
-    if provider in ('openai', 'ollama'):
-        yield from _stream_openai(prompt, cfg)
-    elif provider == 'anthropic':
-        yield from _stream_anthropic(prompt, cfg)
-    else:
-        yield from _stream_openai(prompt, cfg)
+
+    try:
+        # 仅这一行可能同步抛 AllModelsFailed/AllModelsUnavailable（建连/选择阶段），
+        # 此时还没吐任何 token，可安全回退到离线摘要。
+        stream_iter = chat([{'role': 'user', 'content': prompt}],
+                           stream=True, temperature=float(cfg.get('temperature', 0.2)))
+    except (AllModelsFailed, AllModelsUnavailable):
+        for piece in _chunks(offline_answer(query, results)):
+            yield piece
+        yield "\n\n[⚠️ 所有大模型均不可用，已切换为离线摘要模式]"
+        return
+
+    # 进入真正流式：此处之后的异常（含中途断流）由上层 gen() 处理为 error 事件。
+    yield from stream_iter
