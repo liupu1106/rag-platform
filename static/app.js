@@ -7,6 +7,10 @@ const api = (path, body) => fetch(path, {
 }).then(r => r.json());
 
 let CID = null;
+let isUpload = false;          // 当前知识库是否为上传文档
+let loadAllChunks = [];        // 加载/切分步骤的全部片段（用于分页）
+let loadPage = 0;              // 当前页码
+const LOAD_PAGE_SIZE = 20;     // 每页片段数
 const form = {
   chunk_size: 80, overlap: 20,
   query: '拍照答疑功能怎么用？识别不准怎么办？', top_k: 3,
@@ -145,20 +149,49 @@ function renderStep() {
     };
   });
   const rb = $('#runBtn'); if (rb) rb.onclick = () => s.run();
+  // 重新进入加载步骤时，重绑分页按钮（innerHTML 重注入会丢失事件）
+  if (s.key === 'load' && loadAllChunks.length && $('#chunkList-load')) renderChunkList('#chunkList-load');
 }
 
 const esc = s => (s || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 function setOut(key, html) { outputs[key] = html; const o = $('#out-' + key); if (o) o.innerHTML = html; }
 
+// 片段分页渲染：在 hostSel 容器内按 LOAD_PAGE_SIZE 翻页显示 loadAllChunks
+function renderChunkList(hostSel) {
+  const total = loadAllChunks.length;
+  const pages = Math.max(1, Math.ceil(total / LOAD_PAGE_SIZE));
+  if (loadPage >= pages) loadPage = pages - 1;
+  if (loadPage < 0) loadPage = 0;
+  const start = loadPage * LOAD_PAGE_SIZE;
+  const slice = loadAllChunks.slice(start, start + LOAD_PAGE_SIZE);
+  const list = slice.map(c => `<div class="res"><div class="tx">${esc(c.text)}</div><div class="src">▸ ${esc(c.doc_title)} · ${esc(c.id)}</div></div>`).join('');
+  const pager = total > LOAD_PAGE_SIZE ? `<div class="pager">
+      <button class="pg" data-pg="prev" ${loadPage === 0 ? 'disabled' : ''}>‹ 上一页</button>
+      <span>第 ${loadPage + 1} / ${pages} 页</span>
+      <button class="pg" data-pg="next" ${loadPage >= pages - 1 ? 'disabled' : ''}>下一页 ›</button>
+      <span style="margin-left:8px;color:var(--muted);font-size:12px">每页 ${LOAD_PAGE_SIZE} 个，共 ${total} 个片段</span>
+    </div>` : `<div style="color:var(--muted);font-size:12px;margin-top:6px">共 ${total} 个片段</div>`;
+  $(hostSel).innerHTML = list + pager;
+  $(hostSel).querySelectorAll('button[data-pg]').forEach(b => b.onclick = () => {
+    loadPage += (b.dataset.pg === 'next' ? 1 : -1);
+    renderChunkList(hostSel);
+  });
+}
+
 // ---------- 各步骤运行 ----------
 async function runLoad() {
-  const r = await api('/api/load', { chunk_size: +form.chunk_size, overlap: +form.overlap });
+  const useCid = (isUpload && CID) ? CID : null;
+  const r = await api('/api/load', { chunk_size: +form.chunk_size, overlap: +form.overlap, cid: useCid });
   if (!r.ok) return setOut('load', `<h3>出错</h3>${esc(r.error)}`);
   C.chunks = r.chunks; done.add('load');
+  loadAllChunks = r.chunks; loadPage = 0;
   const docs = r.docs.map(d => `<span class="chip">📄 ${esc(d.title)}（${d.len}字）</span>`).join('');
-  const ch = r.chunks.slice(0, 10).map(c => `<div class="res"><div class="tx">${esc(c.text)}</div><div class="src">▸ ${esc(c.doc_title)} · ${esc(c.id)}</div></div>`).join('');
-  setOut('load', `<h3>✅ 已加载 ${r.doc_count} 篇文档，切成 ${r.chunk_count} 个片段</h3><div class="kv">${docs}</div>
-    <div style="margin-top:8px;color:var(--muted);font-size:12.5px">片段预览（前 10 个）：</div>${ch}${r.chunk_count > 10 ? `<div style="color:var(--muted);font-size:12px">…还有 ${r.chunk_count - 10} 个</div>` : ''}`);
+  const head = r.used_upload
+    ? `✅ 已用上传文档「${esc(r.name)}」按新参数重新切分：<b>${r.doc_count}</b> 篇文档，<b>${r.chunk_count}</b> 个片段`
+    : `✅ 已加载内置示例：<b>${r.doc_count}</b> 篇文档，切成 <b>${r.chunk_count}</b> 个片段`;
+  setOut('load', `<h3>${head}</h3><div class="kv">${docs}</div>
+    <div style="margin-top:8px;color:var(--muted);font-size:12.5px">片段预览（可翻页）：</div><div id="chunkList-load"></div>`);
+  renderChunkList('#chunkList-load');
   renderPipeline(); renderStep();
 }
 
@@ -167,12 +200,14 @@ async function runUpload(files) {
   for (const f of files) fd.append('file', f);
   const r = await fetch('/api/upload', { method: 'POST', body: fd }).then(x => x.json());
   if (!r.ok) return ($('#upMsg').textContent = '上传失败：' + (r.error || ''), $('#upMsg').style.color = 'var(--red)');
-  CID = r.cid; form.emb_kind = 'tfidf';
+  CID = r.cid; isUpload = true; form.emb_kind = 'tfidf';
   done.add('load'); done.add('embed');
   $('#curCol').textContent = r.name || r.cid;
   $('#upMsg').textContent = `已建库「${r.name || r.cid}」(${r.chunk_count} 片段)`;
-  const ch = (r.chunks || []).slice(0, 8).map(c => `<div class="res"><div class="tx">${esc(c.text)}</div><div class="src">▸ ${esc(c.doc_title)}</div></div>`).join('');
-  setOut('load', `<h3>✅ 已上传并向量化：${esc(r.name || r.cid)}（${r.chunk_count} 片段）</h3><div style="margin-top:8px">${ch}</div>`);
+  loadAllChunks = r.chunks || []; loadPage = 0;
+  setOut('load', `<h3>✅ 已上传并向量化：${esc(r.name || r.cid)}（${r.chunk_count} 片段）</h3>
+    <div style="margin-top:8px;color:var(--muted);font-size:12.5px">片段预览（可翻页）：</div><div id="chunkList-load"></div>`);
+  renderChunkList('#chunkList-load');
   renderPipeline(); renderStep();
 }
 

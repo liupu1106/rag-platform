@@ -16,15 +16,16 @@ def _ensure():
     os.makedirs(STORE_DIR, exist_ok=True)
 
 
-def save_collection(cid, name, chunks, embedder, matrix):
+def save_collection(cid, name, chunks, embedder, matrix, raw=None):
     _ensure()
     d = os.path.join(STORE_DIR, cid)
     os.makedirs(d, exist_ok=True)
     np.save(os.path.join(d, 'matrix.npy'), matrix)
     meta = {'cid': cid, 'name': name, 'created': time.time(),
-            'chunks': chunks, 'embedder': embedder.to_dict() if hasattr(embedder, 'to_dict') else {'type': embedder.type}}
+            'chunks': chunks, 'raw': raw,
+            'embedder': embedder.to_dict() if hasattr(embedder, 'to_dict') else {'type': embedder.type}}
     json.dump(meta, open(os.path.join(d, 'meta.json'), 'w'), ensure_ascii=False)
-    COLLECTIONS[cid] = {'chunks': chunks, 'embedder': embedder, 'matrix': matrix, 'name': name}
+    COLLECTIONS[cid] = {'chunks': chunks, 'embedder': embedder, 'matrix': matrix, 'name': name, 'raw': raw}
 
 
 def load_collection(cid):
@@ -41,7 +42,7 @@ def load_collection(cid):
         e.matrix = matrix
     else:
         e = None  # OpenAI 集合需密钥才能重新 embed 查询，矩阵仍可用于展示
-    COLLECTIONS[cid] = {'chunks': meta['chunks'], 'embedder': e, 'matrix': matrix, 'name': meta['name']}
+    COLLECTIONS[cid] = {'chunks': meta['chunks'], 'embedder': e, 'matrix': matrix, 'name': meta['name'], 'raw': meta.get('raw')}
     return COLLECTIONS[cid]
 
 

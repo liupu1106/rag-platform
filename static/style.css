@@ -78,6 +78,11 @@ input[type=number]{width:90px}
   padding:2px 8px;border-radius:999px}
 .res .src{font-size:11.5px;color:var(--blue);margin:4px 0}
 .res .tx{color:var(--txt);font-size:13px;line-height:1.6}
+.pager{display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap}
+.pager .pg{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;
+  padding:6px 12px;font-size:12.5px;cursor:pointer;transition:.2s}
+.pager .pg:hover:not(:disabled){border-color:var(--cyan);color:var(--cyan)}
+.pager .pg:disabled{opacity:.4;cursor:not-allowed}
 pre{white-space:pre-wrap;word-break:break-word;background:#0a0f22;border:1px solid var(--line);
   border-radius:10px;padding:12px;color:#cdd6f4;font-size:12.5px;line-height:1.6;max-height:340px;overflow:auto}
 .vec{display:flex;gap:6px;flex-wrap:wrap}

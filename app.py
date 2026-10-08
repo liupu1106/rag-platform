@@ -134,6 +134,13 @@ def api_config():
 
 
 # ---------------- 加载 / 切分 ----------------
+def rechunk_raw(raw, size, overlap):
+    """对原始文本（[{title,text}]）重新切分，返回 (docs, chunks)。"""
+    docs = [{'id': f'doc{i}', 'title': r['title'], 'text': r['text']} for i, r in enumerate(raw)]
+    chunks = build_chunks(docs, size, overlap)
+    return docs, chunks
+
+
 @app.route('/api/load', methods=['POST'])
 def api_load():
     g = guard()
@@ -141,6 +148,20 @@ def api_load():
         return g
     d = request.get_json(silent=True) or {}
     size, overlap = int(d.get('chunk_size', 80)), int(d.get('overlap', 20))
+    # 若指定了上传集合（且含原始文本），则对该集合用新参数重新切分
+    cid = d.get('cid')
+    if cid and cid != DEFAULT_CID:
+        col = load_collection(cid)
+        if col and col.get('raw'):
+            raw = col['raw']
+            docs, chunks = rechunk_raw(raw, size, overlap)
+            emb = TfidfEmbedder().fit([c['text'] for c in chunks])
+            save_collection(cid, col['name'], chunks, emb, emb.matrix, raw=raw)
+            return jsonify({'ok': True, 'cid': cid, 'used_upload': True, 'name': col['name'],
+                            'doc_count': len(docs), 'chunk_count': len(chunks),
+                            'chunk_size': size, 'overlap': overlap,
+                            'docs': [{'id': x['id'], 'title': x['title'], 'len': len(x['text'])} for x in docs],
+                            'chunks': chunks})
     docs = load_default_docs()
     chunks = build_chunks(docs, size, overlap)
     col = load_collection(DEFAULT_CID)
@@ -148,7 +169,8 @@ def api_load():
     col['embedder'] = TfidfEmbedder().fit([c['text'] for c in chunks])
     col['matrix'] = col['embedder'].matrix
     save_collection(DEFAULT_CID, '内置示例文档', chunks, col['embedder'], col['matrix'])
-    return jsonify({'ok': True, 'cid': DEFAULT_CID, 'doc_count': len(docs), 'chunk_count': len(chunks),
+    return jsonify({'ok': True, 'cid': DEFAULT_CID, 'used_upload': False, 'name': '内置示例文档',
+                    'doc_count': len(docs), 'chunk_count': len(chunks),
                     'chunk_size': size, 'overlap': overlap,
                     'docs': [{'id': x['id'], 'title': x['title'], 'len': len(x['text'])} for x in docs],
                     'chunks': chunks})
@@ -163,24 +185,23 @@ def api_upload():
     files = request.files.getlist('file')
     if not files:
         return jsonify({'ok': False, 'error': '请选择文件'}), 400
-    texts = []
+    raw = []
     for f in files:
         t = extract_text(f)
         if t.strip():
-            texts.append(t)
-    if not texts:
+            raw.append({'title': (f.filename or f'文档{len(raw)}')[:40], 'text': t})
+    if not raw:
         return jsonify({'ok': False, 'error': '未能从文件中提取到文本'}), 400
     cid = 'u' + str(int(time.time()))[4:]
     chunks = []
-    for ti, t in enumerate(texts):
-        for ci, piece in enumerate(chunk_text(t, 80, 20)):
+    for ti, r in enumerate(raw):
+        for ci, piece in enumerate(chunk_text(r['text'], 80, 20)):
             chunks.append({'id': f"{cid}-d{ti}-c{ci}", 'doc_id': f"doc{ti}",
-                           'doc_title': (files[min(ti, len(files)-1)].filename or f'文档{ti}')[:40],
-                           'text': piece})
+                           'doc_title': r['title'], 'text': piece})
     emb = TfidfEmbedder().fit([c['text'] for c in chunks])
-    save_collection(cid, f'上传文档({len(files)}个)', chunks, emb, emb.matrix)
-    return jsonify({'ok': True, 'cid': cid, 'chunk_count': len(chunks), 'chunks': chunks[:20],
-                    'name': f'上传文档({len(files)}个)'})
+    save_collection(cid, f'上传文档({len(raw)}个)', chunks, emb, emb.matrix, raw=raw)
+    return jsonify({'ok': True, 'cid': cid, 'chunk_count': len(chunks), 'chunks': chunks,
+                    'name': f'上传文档({len(raw)}个)'})
 
 
 # ---------------- 向量化建库 ----------------
