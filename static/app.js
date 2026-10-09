@@ -4,7 +4,11 @@ const api = (path, body) => fetch(path, {
   method: body ? 'POST' : 'GET',
   headers: { 'Content-Type': 'application/json' },
   body: body ? JSON.stringify(body) : undefined,
-}).then(r => r.json());
+}).then(async r => {
+  const ct = r.headers.get('content-type') || '';
+  const data = ct.includes('application/json') ? await r.json() : { ok: false, error: '服务器返回非 JSON（可能 500）：' + (await r.text()).slice(0, 200) };
+  return data;
+}).catch(e => ({ ok: false, error: '请求失败：' + e.message }));
 
 let CID = null;
 let isUpload = false;          // 当前知识库是否为上传文档
@@ -12,7 +16,7 @@ let loadAllChunks = [];        // 加载/切分步骤的全部片段（用于分
 let loadPage = 0;              // 当前页码
 const LOAD_PAGE_SIZE = 20;     // 每页片段数
 const form = {
-  chunk_size: 80, overlap: 20,
+  token_num: 128, method: 'general',
   query: '拍照答疑功能怎么用？识别不准怎么办？', top_k: 3,
   hybrid: false, rerank: false, rewrite: false,
   emb_kind: 'tfidf', emb_base: 'https://api.openai.com/v1', emb_key: '', emb_model: 'text-embedding-3-small',
@@ -31,11 +35,11 @@ const STEPS = [
     inputs: [], run: null },
 
   { key: 'load', ico: '📄', t: '加载与切分', s: '① 建库',
-    info: '长文档直接检索不精准也超长。切成小段（chunk）后每段语义更聚焦，检索能命中“最相关的那一块”。窗口大小与重叠控制切法。也可直接“上传文档”建独立知识库。',
-    explain: '第一步：把内置示例文档切成小段；或点顶部「上传文档」导入你自己的 .txt/.md/.json/.pdf。',
+    info: '采用 RAGFlow 风格的内容感知切分：先识别文档大纲（Markdown #、第X章、1.2.3 编号、一、二、等标题层级），再按 Token 预算把相邻内容聚合成块，并给每个块拼接祖先标题作上下文，检索更精准。可选文档类型（通用/论文/手册/简历）对应不同的 Token 预算。也可直接“上传文档”建独立知识库。',
+    explain: '第一步：把内置示例文档按 RAGFlow 风格切分；或点顶部「上传文档」导入你自己的 .txt/.md/.json/.pdf。切换“文档类型”或调整 Token 预算可对比不同切法对检索效果的影响。',
     inputs: [
-      { name: 'chunk_size', label: '片段长度(字)', type: 'number', min: 20 },
-      { name: 'overlap', label: '重叠(字)', type: 'number', min: 0 },
+      { name: 'token_num', label: 'Token 预算(每块上限)', type: 'number', min: 20 },
+      { name: 'method', label: '文档类型', type: 'select', opts: [['general', '通用'], ['paper', '论文'], ['manual', '手册'], ['resume', '简历']] },
     ], run: runLoad },
 
   { key: 'embed', ico: '🔢', t: '向量化建库', s: '② 建库',
@@ -144,8 +148,15 @@ function renderStep() {
     el.oninput = el.onchange = () => {
       const f = el.dataset.f;
       form[f] = el.type === 'checkbox' ? el.checked : (el.tagName === 'SELECT' ? el.value : el.value);
-      // emb_kind 切换时重渲染以显隐 API 字段
-      if (f === 'emb_kind') renderStep();
+      if (f === 'emb_kind') { renderStep(); return; }
+      if (f === 'method') {
+        // 文档类型切换：套用该类型默认 Token 预算，让选择真正影响切分结果
+        const presets = { general: 60, paper: 40, manual: 28, resume: 256 };
+        form.token_num = presets[form.method] || 128;
+        renderStep();
+        if (done.has('load')) runLoad();
+        return;
+      }
     };
   });
   const rb = $('#runBtn'); if (rb) rb.onclick = () => s.run();
@@ -181,14 +192,15 @@ function renderChunkList(hostSel) {
 // ---------- 各步骤运行 ----------
 async function runLoad() {
   const useCid = (isUpload && CID) ? CID : null;
-  const r = await api('/api/load', { chunk_size: +form.chunk_size, overlap: +form.overlap, cid: useCid });
+  const r = await api('/api/load', { token_num: +form.token_num, method: form.method, cid: useCid });
   if (!r.ok) return setOut('load', `<h3>出错</h3>${esc(r.error)}`);
   C.chunks = r.chunks; done.add('load');
   loadAllChunks = r.chunks; loadPage = 0;
   const docs = r.docs.map(d => `<span class="chip">📄 ${esc(d.title)}（${d.len}字）</span>`).join('');
+  const mlabel = { general: '通用', paper: '论文', manual: '手册', resume: '简历' }[r.method] || r.method;
   const head = r.used_upload
-    ? `✅ 已用上传文档「${esc(r.name)}」按新参数重新切分：<b>${r.doc_count}</b> 篇文档，<b>${r.chunk_count}</b> 个片段`
-    : `✅ 已加载内置示例：<b>${r.doc_count}</b> 篇文档，切成 <b>${r.chunk_count}</b> 个片段`;
+    ? `✅ 已用上传文档「${esc(r.name)}」按「${mlabel}」(Token 预算 ${r.token_num}) 重新切分：<b>${r.doc_count}</b> 篇文档，<b>${r.chunk_count}</b> 个片段`
+    : `✅ 已加载内置示例：<b>${r.doc_count}</b> 篇文档，按「${mlabel}」(Token 预算 ${r.token_num}) 切成 <b>${r.chunk_count}</b> 个片段`;
   setOut('load', `<h3>${head}</h3><div class="kv">${docs}</div>
     <div style="margin-top:8px;color:var(--muted);font-size:12.5px">片段预览（可翻页）：</div><div id="chunkList-load"></div>`);
   renderChunkList('#chunkList-load');

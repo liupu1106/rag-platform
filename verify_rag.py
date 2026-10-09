@@ -13,7 +13,7 @@ def api(path, body=None):
     return requests.post(BASE+path, json=body).json()
 
 # 1) 加载与切分
-r = api('/api/load', {'chunk_size':80, 'overlap':20})
+r = api('/api/load', {'token_num':128, 'method':'general'})
 ok &= check('加载切分: ok', r.get('ok'))
 ok &= check('加载切分: 6 篇文档', r.get('doc_count')==6, f"doc_count={r.get('doc_count')}")
 ok &= check('加载切分: 切出片段>0', r.get('chunk_count',0)>0, f"chunk_count={r.get('chunk_count')}")

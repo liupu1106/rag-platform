@@ -19,7 +19,7 @@ def test_state_and_default():
 
 
 def test_load():
-    r = client.post('/api/load', json={'chunk_size': 80, 'overlap': 20}).get_json()
+    r = client.post('/api/load', json={'token_num': 128, 'method': 'general'}).get_json()
     assert r['ok'] and r['doc_count'] == 6 and r['chunk_count'] > 0
 
 

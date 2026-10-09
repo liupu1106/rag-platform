@@ -7,7 +7,7 @@ import numpy as np
 
 from embed import make_embedder, TfidfEmbedder, pca2_fit, pca2_project
 from store import build_default, load_collection, save_collection, list_collections, DEFAULT_CID, STORE_DIR
-from datautil import load_default_docs, build_chunks, chunk_text, GOLD
+from datautil import load_default_docs, build_chunks, split_document, GOLD
 from retrieve import search
 from rewrite import rewrite_query
 from generate import stream_generate, offline_answer
@@ -15,6 +15,14 @@ from evalutil import evaluate
 from auth import guard
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
+
+
+# 开发期避免浏览器缓存静态文件（否则改了 app.js 看不到效果）
+@app.after_request
+def _no_cache_static(resp):
+    if request.path.startswith('/static/'):
+        resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 # 配置：优先读环境变量（云端用 Secret 注入），UI 填写仅覆盖本次进程内存
 def _env(name, dflt):
@@ -134,10 +142,10 @@ def api_config():
 
 
 # ---------------- 加载 / 切分 ----------------
-def rechunk_raw(raw, size, overlap):
-    """对原始文本（[{title,text}]）重新切分，返回 (docs, chunks)。"""
+def rechunk_raw(raw, token_num, method='general'):
+    """对原始文本（[{title,text}]）用 RAGFlow 风格重新切分，返回 (docs, chunks)。"""
     docs = [{'id': f'doc{i}', 'title': r['title'], 'text': r['text']} for i, r in enumerate(raw)]
-    chunks = build_chunks(docs, size, overlap)
+    chunks = build_chunks(docs, token_num, method)
     return docs, chunks
 
 
@@ -147,23 +155,24 @@ def api_load():
     if g:
         return g
     d = request.get_json(silent=True) or {}
-    size, overlap = int(d.get('chunk_size', 80)), int(d.get('overlap', 20))
+    token_num = int(d.get('token_num', 128))
+    method = d.get('method', 'general')
     # 若指定了上传集合（且含原始文本），则对该集合用新参数重新切分
     cid = d.get('cid')
     if cid and cid != DEFAULT_CID:
         col = load_collection(cid)
         if col and col.get('raw'):
             raw = col['raw']
-            docs, chunks = rechunk_raw(raw, size, overlap)
+            docs, chunks = rechunk_raw(raw, token_num, method)
             emb = TfidfEmbedder().fit([c['text'] for c in chunks])
             save_collection(cid, col['name'], chunks, emb, emb.matrix, raw=raw)
             return jsonify({'ok': True, 'cid': cid, 'used_upload': True, 'name': col['name'],
                             'doc_count': len(docs), 'chunk_count': len(chunks),
-                            'chunk_size': size, 'overlap': overlap,
+                            'token_num': token_num, 'method': method,
                             'docs': [{'id': x['id'], 'title': x['title'], 'len': len(x['text'])} for x in docs],
                             'chunks': chunks})
     docs = load_default_docs()
-    chunks = build_chunks(docs, size, overlap)
+    chunks = build_chunks(docs, token_num, method)
     col = load_collection(DEFAULT_CID)
     col['chunks'] = chunks
     col['embedder'] = TfidfEmbedder().fit([c['text'] for c in chunks])
@@ -171,7 +180,7 @@ def api_load():
     save_collection(DEFAULT_CID, '内置示例文档', chunks, col['embedder'], col['matrix'])
     return jsonify({'ok': True, 'cid': DEFAULT_CID, 'used_upload': False, 'name': '内置示例文档',
                     'doc_count': len(docs), 'chunk_count': len(chunks),
-                    'chunk_size': size, 'overlap': overlap,
+                    'token_num': token_num, 'method': method,
                     'docs': [{'id': x['id'], 'title': x['title'], 'len': len(x['text'])} for x in docs],
                     'chunks': chunks})
 
@@ -195,7 +204,7 @@ def api_upload():
     cid = 'u' + str(int(time.time()))[4:]
     chunks = []
     for ti, r in enumerate(raw):
-        for ci, piece in enumerate(chunk_text(r['text'], 80, 20)):
+        for ci, piece in enumerate(split_document(r['text'], 'general', 128)):
             chunks.append({'id': f"{cid}-d{ti}-c{ci}", 'doc_id': f"doc{ti}",
                            'doc_title': r['title'], 'text': piece})
     emb = TfidfEmbedder().fit([c['text'] for c in chunks])
